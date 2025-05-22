@@ -1,8 +1,8 @@
+#include "src/memllib/PicoDefs.hpp"
 #include "src/memllib/audio/AudioDriver.hpp"
 #include "src/memllib/hardware/memlnaut/MEMLNaut.hpp"
 #include <memory>
 #include "src/memllib/interface/MIDIInOut.hpp"
-#include "src/memllib/PicoDefs.hpp"
 #include "src/memllib/interface/UARTInput.hpp"
 
 // Example apps and interfaces
@@ -48,21 +48,28 @@ public:
         SmoothParams_();
 
         // Process audio
-        float y = x.L, yL, yR;
+        float y = x.L + x.R;
+        float yL, yR;
         float dry = y;
 
-        y = pitchshifter_.Process(y);
-        yL = y + delay_line_1_.play(y,
-                               static_cast<size_t>(dl1_delay_time_),
-                               dl1_feedback_) * dl1_wet_;
-        yR = y + delay_line_2_.play(y,
-                               static_cast<size_t>(dl2_delay_time_),
-                               dl2_feedback_) * dl2_wet_;
+        // y = pitchshifter_.Process(y);
+        y = y + delay_line_1_.play(y,
+                                static_cast<size_t>(dl1_delay_time_),
+                                dl1_feedback_) * dl1_wet_;
+        // yR = y + delay_line_2_.play(y,
+        //                        static_cast<size_t>(dl2_delay_time_),
+        //                        dl2_feedback_) * dl2_wet_;
 
         // Apply dry/wet mix
-        yL = 0.5f * yL + 0.5f * dry;
-        yR = 0.5f * yR + 0.5f * dry;
-        stereosample_t ret { yL, yR };
+        // y = 0.5f * yL + 0.5f * dry;
+        // yR = 0.5f * yR + 0.5f * dry;
+        stereosample_t ret { y, y };
+        // PERIODIC_DEBUG(48000, {
+        //     Serial.print("L: ");
+        //     Serial.print(x.L);
+        //     Serial.print(", R: ");
+        //     Serial.println(x.R);
+        // })
         return ret;
     }
 
@@ -266,7 +273,7 @@ void bind_interface(std::shared_ptr<CURRENT_INTERFACE> &interface)
 
     MEMLNaut::Instance()->setRVGain1Callback([interface] (float value) {
         AudioDriver::setDACVolume(value);
-        Serial.println(value*4);
+        Serial.println(value);
     });
 }
 

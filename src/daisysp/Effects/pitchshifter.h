@@ -157,8 +157,14 @@ class PitchShifter
         if(transpose_ != transpose || force_recalc_)
         {
             transpose_ = transpose;
-            idx        = (uint8_t)fabsf(transpose);
-            ratio      = semitone_ratios_[idx % 12];
+            //old code:
+            // idx        = (uint8_t)fabsf(transpose);
+            // ratio      = semitone_ratios_[idx % 12];
+            
+            //new code:
+            //from:  semitone_ratios_[i] = powf(2.0f, (float)i / 12);
+            ratio = powf(2.0f, transpose * (1/12.f));
+
             ratio *= (uint8_t)(fabsf(transpose) / 12) + 1;
             if(transpose > 0.0f)
             {
