@@ -17,14 +17,12 @@
  */
 
 #include <cmath>
-#include "src/daisysp/Effects/pitchshifter.h"
 #include "src/memllib/synth/maximilian.h"
 #include "src/memllib/audio/AudioAppBase.hpp"
 #include "src/memllib/synth/OnePoleSmoother.hpp"
 
-static constexpr float shift_amount = -3.f;
-
 volatile float input_level = 0;
+volatile float input_pitch = 0;
 
 class FXProcessorAudioApp : public AudioAppBase
 {
@@ -33,24 +31,68 @@ public:
         return {
             .mic_input = true,
             .line_level = 3,
-            .mic_gain_dB = 26,
+            .mic_gain_dB = 20,
             .output_volume = 0.8f
         };
     }
 
-    static constexpr size_t kN_Params = 7;
+    struct Params {
+        float f_drift;
+        float env_release;
+        float dns_ratio;
+    };
+    static constexpr size_t kN_Params = sizeof(Params) / sizeof(float);
+
+    const struct {
+        float min = 40.f;
+        float max = 400.f;
+    } freq_range;
 
     FXProcessorAudioApp() : AudioAppBase(),
         setup_(false),
         smoother_(0.001, kSampleRate),
         target_params_(kN_Params, 0),
-        smoothed_params_(kN_Params, 0),
-        dl1_delay_time_(1.0f),
-        dl1_feedback_(0.0f),
-        dl1_wet_(0.0f),
-        dl2_delay_time_(1.0f),
-        dl2_feedback_(0.0f),
-        dl2_wet_(0.0f) {}
+        smoothed_params_(kN_Params, 0) {}
+
+    void Setup(float sample_rate, std::shared_ptr<InterfaceBase> interface) override
+    {
+        AudioAppBase::Setup(sample_rate, interface);
+        // Additional setup code specific to FMSynthAudioApp
+        // Set param smoothers
+        smoother_.SetTimeMs(50.f);
+
+        // Pitch detector setup
+        bandpass_low.set(maxiBiquad::LOWPASS,
+                         freq_range.max,
+                         0.707f, 0);
+        bandpass_high.set(maxiBiquad::HIGHPASS,
+                          freq_range.min,
+                          0.707f, 0);
+        pitch_detector.setup();
+
+        // Synth setup
+        env.setAttack(10);
+        env.setRelease(300);
+        for (size_t n = 0; n < freq_scalings_.size(); n++) {
+            osc_[n].UpdateParams();
+        }
+
+        // Downsampler
+        dns_lpf_.set(maxiBiquad::LOWPASS,
+                     250.f,
+                     5.f, 0);
+
+        // Default parameters
+        Params default_params {
+            .f_drift = 0.97,
+            .env_release = 100,
+            .dns_ratio = 15
+        };
+        params_ = default_params;
+
+        // Setup finished
+        setup_ = true;
+    }
 
     stereosample_t Process(const stereosample_t x) override
     {
@@ -61,37 +103,46 @@ public:
         // Smooth parameters
         SmoothParams_();
 
-        // Process audio
-        float y = x.L, yL, yR;
-        float dry = y;
+        float dry = x.L;
+        env.play(dry);
+        // Pitch detection
+        float detect = bandpass_low.play(dry);
+        detect = bandpass_high.play(detect);
+        float pitch = pitch_detector.process(detect);
+        WRITE_VOLATILE(input_pitch, pitch);
+        // if (pitch < freq_range.min || pitch > freq_range.max) {
+        //     pitch = 0;
+        // }
 
-        y = pitchshifter_.Process(y);
-        yL = y /*+ delay_line_1_.play(y,
-                               static_cast<size_t>(dl1_delay_time_),
-                               dl1_feedback_) * dl1_wet_*/;
-        yR = y /*+ delay_line_2_.play(y,
-                               static_cast<size_t>(dl2_delay_time_),
-                               dl2_feedback_) * dl2_wet_*/;
+        // Synth
+        float synth = 0;
+        std::array<float, 2> scalings {
+            params_.f_drift,
+            1.f/params_.f_drift
+        };
+        for (size_t n = 0; n < freq_scalings_.size(); n++) {
+            synth += osc_[n].sawn(pitch * scalings[n])
+                     * (1.f/freq_scalings_.size());
+        }
 
-        // Apply dry/wet mix
-        //yL = 0.5f * yL + 0.5f * dry;
-        //yR = 0.5f * yR + 0.5f * dry;
-        stereosample_t ret { yL, yR };
-        return ret;
-    }
+        // Decimation
+        float decim = dns_.play(dry, kSampleRate / params_.dns_ratio);
+        decim *= 3.f;
+        //decim = std::tanh(decim);
+        //decim = quant_.play(decim, 16);
 
-    void Setup(float sample_rate, std::shared_ptr<InterfaceBase> interface) override
-    {
-        AudioAppBase::Setup(sample_rate, interface);
-        // Additional setup code specific to FMSynthAudioApp
-        // Set param smoothers
-        smoother_.SetTimeMs(0.1f);
-        // Pitch Shifter:
-        pitchshifter_.Init(sample_rate);
-        pitchshifter_.SetTransposition(shift_amount);
+        // Output
+        float out_env = env.getEnv();
+        out_env *= 6.f;
+        out_env = std::pow(out_env, 1.8f);
+        out_env = std::tanh(out_env);
+        // if (out_env < 0.01) {
+        //     out_env = 0;
+        // }
+        float yL = synth * out_env;
+        float yR = yL; //decim;
 
-        // Setup finished
-        setup_ = true;
+        return { yL, yR };
     }
 
     void ProcessParams(const std::vector<float>& params) override
@@ -107,24 +158,29 @@ protected:
     std::vector<float> target_params_;
     std::vector<float> smoothed_params_;
     OnePoleSmoother<kN_Params> smoother_;
+    Params params_;
 
-    // DSP blocks:
-    // - Pitch Shifter
-    daisysp::PitchShifter pitchshifter_;
-    // - Delay line 1
-    static constexpr float kDelayLine1MaxTime = 0.5f;
-    static constexpr size_t kDelayLine1Size = kDelayLine1MaxTime * kSampleRate;
-    float dl1_delay_time_;
-    float dl1_feedback_;
-    float dl1_wet_;
-    maxiDelayline<kDelayLine1Size> delay_line_1_;
-    // - Delay line 2
-    static constexpr float kDelayLine2MaxTime = 0.05f;
-    static constexpr size_t kDelayLine2Size = kDelayLine2MaxTime * kSampleRate;
-    float dl2_delay_time_;
-    float dl2_feedback_;
-    float dl2_wet_;
-    maxiDelayline<kDelayLine2Size> delay_line_2_;
+    // Pitch detector:
+    // - Bandpass biquad
+    maxiBiquad bandpass_low;
+    maxiBiquad bandpass_high;
+    // - Zero crossing detector
+    maxiZeroCrossingAvg pitch_detector;
+
+    // Synth:
+    // - Envelope
+    maxiEnvelopeFollowerF env;
+    // - Oscillator
+    static constexpr std::array<float, 2> freq_scalings_
+            {0.97f, 1.03f};
+    std::array<maxiOsc, freq_scalings_.size()> osc_;
+
+    // Downsampler
+    // - downsample
+    maxiDownSample dns_;
+    // - decimate
+    maxiBitQuant quant_;
+    maxiBiquad dns_lpf_;
 
     /**
      * @brief Linear mapping function
@@ -173,28 +229,12 @@ protected:
     void SmoothParams_() {
         smoother_.Process(target_params_.data(), smoothed_params_.data());
 
+        auto param_ptr = smoothed_params_.data();
         // Assign smoothed parameters to their functions
-        // Pitch Shifter:
-        // - transposition
-        /*float pitch_shift = LinearMap_(smoothed_params_[0], -12.f, 12.f);
-        pitchshifter_.SetTransposition(pitch_shift);*/
-        pitchshifter_.SetTransposition(shift_amount);
-        // Delay line 1:
-        // - delay time
-        dl1_delay_time_ = LinearMap_(smoothed_params_[1], 1.f,
-                                     kDelayLine1MaxTime * kSampleRate - 1);
-        // - feedback
-        dl1_feedback_ = LinearMap_(smoothed_params_[2], 0.f, 0.95f);
-        // - wet
-        dl1_wet_ = SCurveMap_(smoothed_params_[3], 0.f, 1.f, 0.6f);
-        // Delay line 2:
-        // - delay time
-        dl2_delay_time_ = LinearMap_(smoothed_params_[4], 1.f,
-                                     kDelayLine2MaxTime * kSampleRate - 1);
-        // - feedback
-        dl2_feedback_ = LinearMap_(smoothed_params_[5], 0.f, 0.95f);
-        // - wet
-        dl2_wet_ = SCurveMap_(smoothed_params_[6], 0.f, 1.f, 0.6f);
+        params_.f_drift = LinearMap_(*param_ptr++, 0.86, 0.995);
+        params_.dns_ratio = SCurveMap_(*param_ptr++, 3, 18, 0.5);
+        params_.env_release = LinearMap_(*param_ptr++, 10, 500);
+        env.setRelease(params_.env_release);
     }
 };
 
@@ -218,12 +258,13 @@ volatile bool serial_ready = false;
 volatile bool interface_ready = false;
 
 // We're only bound to the joystick inputs (x, y, rotate)
-const size_t kN_InputParams = 3;
+const size_t kN_InputParams = 2;
 const std::vector<size_t> kUARTListenInputs {};
 
 
 void bind_interface(std::shared_ptr<CURRENT_INTERFACE> &interface)
 {
+/*
     // Set up momentary switch callbacks
     MEMLNaut::Instance()->setMomA1Callback([interface] () {
         interface->Randomise();
@@ -237,8 +278,19 @@ void bind_interface(std::shared_ptr<CURRENT_INTERFACE> &interface)
             display->post("Dataset cleared");
         }
     });
+*/
+    MEMLNaut::Instance()->setMomB2Callback([interface] () {
+        Serial.println("MOM_B2 pressed");
+    });
+    MEMLNaut::Instance()->setMomB1Callback([interface] () {
+        Serial.println("MOM_B1 pressed");
+    });
+    MEMLNaut::Instance()->setMomA2Callback([interface] () {
+        Serial.println("MOM_A2 pressed");
+    });
 
     // Set up toggle switch callbacks
+/*
     MEMLNaut::Instance()->setTogA1Callback([interface] (bool state) {
         if (display) {
             display->post(state ? "Training mode" : "Inference mode");
@@ -248,6 +300,31 @@ void bind_interface(std::shared_ptr<CURRENT_INTERFACE> &interface)
             display->post("Model trained");
         }
     });
+*/
+    MEMLNaut::Instance()->setTogA1Callback([interface] (bool state) {
+        if (state) {
+            Serial.println("TOG_A1 pressed");
+        }
+    });
+    MEMLNaut::Instance()->setTogA2Callback([interface] (bool state) {
+        if (state) {
+            Serial.println("TOG_A2 pressed");
+        }
+    });
+    MEMLNaut::Instance()->setTogB1Callback([interface] (bool state) {
+        if (state) {
+            Serial.println("TOG_B1 pressed");
+        }
+    });
+    MEMLNaut::Instance()->setTogB2Callback([interface] (bool state) {
+        if (state) {
+            Serial.println("TOG_B2 pressed");
+            // Randomise
+            interface->SetTrainingMode(CURRENT_INTERFACE::TRAINING_MODE);
+            interface->Randomise();
+        }
+    });
+
     MEMLNaut::Instance()->setJoySWCallback([interface] (bool state) {
         interface->SaveInput(state ? CURRENT_INTERFACE::STORE_VALUE_MODE : CURRENT_INTERFACE::STORE_POSITION_MODE);
         if (display) {
@@ -263,16 +340,20 @@ void bind_interface(std::shared_ptr<CURRENT_INTERFACE> &interface)
         MEMLNaut::Instance()->setJoyYCallback([interface] (float value) {
             interface->SetInput(1, value);
         });
+/*
         MEMLNaut::Instance()->setJoyZCallback([interface] (float value) {
             interface->SetInput(2, value);
         });
+*/
     }
+/*
     // Set up other ADC callbacks
     MEMLNaut::Instance()->setRVZ1Callback([interface] (float value) {
         // Scale value from 0-1 range to 1-3000
         value = 1.0f + (value * 2999.0f);
         interface->SetIterations(static_cast<size_t>(value));
     });
+*/
 
     // Set up loop callback
     MEMLNaut::Instance()->setLoopCallback([interface] () {
@@ -282,7 +363,7 @@ void bind_interface(std::shared_ptr<CURRENT_INTERFACE> &interface)
     MEMLNaut::Instance()->setRVGain1Callback([interface] (float value) {
         //AudioDriver::setDACVolume(value);
         //Serial.println(value*4);
-        Serial.println("ADCDAC bypassed!");
+        //Serial.println("ADCDAC bypassed!");
         AudioDriver::setDACVolume(3.9f);
     });
 }
@@ -403,7 +484,9 @@ void loop()
         if (blip_counter++ > 100) {
             blip_counter = 0;
             float local_input_level = READ_VOLATILE(input_level);
-            Serial.println(local_input_level);
+            float local_input_pitch = READ_VOLATILE(input_pitch);
+            //Serial.printf("Level: %f, Pitch: %f\n", local_input_level, local_input_pitch);
+            Serial.println(".");
             // Blink LED
             digitalWrite(33, HIGH);
         } else {
