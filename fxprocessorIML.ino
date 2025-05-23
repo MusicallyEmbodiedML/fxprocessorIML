@@ -21,12 +21,15 @@
  */
 
 #include <cmath>
+#include <cstring>
 #include "src/memllib/synth/maximilian.h"
 #include "src/memllib/audio/AudioAppBase.hpp"
 #include "src/memllib/synth/OnePoleSmoother.hpp"
 
 volatile float input_level = 0;
 volatile float input_pitch = 0;
+
+AUDIO_MEM maxiBiquad dns_hpf_;
 
 class FXProcessorAudioApp : public AudioAppBase
 {
@@ -40,10 +43,14 @@ public:
         };
     }
 
+    static constexpr size_t kPatternLength = 8;
+
     struct Params {
         float f_drift;
         float env_release;
         float dns_ratio;
+        float cutoffs[kPatternLength];
+        float resos[kPatternLength];
     };
     static constexpr size_t kN_Params = sizeof(Params) / sizeof(float);
 
@@ -82,15 +89,20 @@ public:
         }
 
         // Downsampler
-        dns_lpf_.set(maxiBiquad::LOWPASS,
-                     250.f,
-                     5.f, 0);
+        // dns_lpf_.set(maxiBiquad::LOWPASS,
+        //              2000.f,
+        //              5.f, 0);
+        dns_hpf_.set(maxiBiquad::HIGHPASS,
+                     40.f,
+                     0.707f, 0);
 
         // Default parameters
         Params default_params {
             .f_drift = 0.97,
             .env_release = 100,
-            .dns_ratio = 15
+            .dns_ratio = 15,
+            .cutoffs = { 100, 200, 300, 400, 500, 600, 700, 800 },
+            .resos = { 1, 2, 3, 4, 5, 6, 7, 8 }
         };
         params_ = default_params;
 
@@ -131,8 +143,19 @@ public:
 
         // Decimation
         float decim = dns_.play(dry, kSampleRate / params_.dns_ratio);
-        decim *= 3.f;
-        //decim = std::tanh(decim);
+        static float decim_prev = 0;
+        if (decim != decim_prev) {
+            decim_prev = decim;
+            dns_lpf_.setParams(params_.cutoffs[pattern_idx_],
+                params_.resos[pattern_idx_]);
+            if (++pattern_idx_ >= kPatternLength) {
+                pattern_idx_ = 0;
+            }
+        }
+        decim = dns_lpf_.play(decim, 1.0f, 0, 0, 0);
+        decim = dns_hpf_.play(decim);
+        decim *= 10.f;
+        decim = std::tanh(decim);
         //decim = quant_.play(decim, 16);
 
         // Output
@@ -143,7 +166,8 @@ public:
         // if (out_env < 0.01) {
         //     out_env = 0;
         // }
-        float yL = synth * out_env;
+        float yL = synth * out_env + decim * 0.5f;
+        yL = std::tanh(yL);
         float yR = yL; //decim;
 
         return { yL, yR };
@@ -184,7 +208,9 @@ protected:
     maxiDownSample dns_;
     // - decimate
     maxiBitQuant quant_;
-    maxiBiquad dns_lpf_;
+    maxiSVF dns_lpf_;
+    // Loop
+    size_t pattern_idx_;
 
     /**
      * @brief Linear mapping function
@@ -230,15 +256,60 @@ protected:
         return fma(result, range, out_min);
     }
 
+    /**
+ * @brief Exponential mapping function optimized for frequency scaling (pow(2,x))
+ *
+ * @param x float between 0 and 1
+ * @param out_min minimum output value (frequency)
+ * @param out_max maximum output value (frequency)
+ * @return float Mapped frequency value
+ */
+static __attribute__((always_inline)) float ExpMap_(float x, float out_min, float out_max) {
+    // Clamp x using branchless min/max
+    x = x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
+
+    // Calculate log2 range for frequency scaling
+    const float log2_min = std::log2(out_min);
+    const float log2_max = std::log2(out_max);
+
+    // Linear interpolation in log space
+    const float log2_val = log2_min + (x * (log2_max - log2_min));
+
+    // Fast pow2 approximation using IEEE float bit manipulation
+    union {
+        float f;
+        int32_t i;
+    } u;
+
+    const float c_log2 = 1.442695040f; // 1/ln(2)
+    const int32_t offset = 0x3f800000; // IEEE float 1.0 in hex
+
+    // Calculate 2^x using bit manipulation
+    u.i = static_cast<int32_t>(log2_val * (1 << 23)) + offset;
+
+    return u.f;
+}
+
     void SmoothParams_() {
         smoother_.Process(target_params_.data(), smoothed_params_.data());
 
         auto param_ptr = smoothed_params_.data();
         // Assign smoothed parameters to their functions
         params_.f_drift = LinearMap_(*param_ptr++, 0.86, 0.995);
-        params_.dns_ratio = SCurveMap_(*param_ptr++, 3, 18, 0.5);
+        params_.dns_ratio = SCurveMap_(*param_ptr++, 4, 12, 0.3);
         params_.env_release = LinearMap_(*param_ptr++, 10, 500);
         env.setRelease(params_.env_release);
+        // Map remaining params to the pattern
+        std::memcpy(params_.cutoffs, target_params_.data()+3,
+                    sizeof(float)*kPatternLength);
+        std::memcpy(params_.resos, target_params_.data()+3+kPatternLength,
+                    sizeof(float)*kPatternLength);
+        for (unsigned int n = 0; n < kPatternLength; n++) {
+            // Scale cutoff
+            params_.cutoffs[n] = ExpMap_(params_.cutoffs[n], 500, 5000);
+            // Scale reso
+            params_.resos[n] = LinearMap_(params_.resos[n], 0.707, 8);
+        }
     }
 };
 
