@@ -91,7 +91,7 @@ public:
         // Synth setup
         env.setAttack(10);
         env.setRelease(300);
-        for (size_t n = 0; n < freq_scalings_.size(); n++) {
+        for (size_t n = 0; n < kFreqScalingsSize; n++) {
             osc_[n].UpdateParams();
         }
 
@@ -120,9 +120,9 @@ public:
 
     stereosample_t Process(const stereosample_t x) override
     {
-        WRITE_VOLATILE(input_level, std::abs(x.L) + std::abs(x.R));
+        // WRITE_VOLATILE(input_level, std::abs(x.L) + std::abs(x.R));
         if (!setup_) {
-            return { 0, 0 };
+            return { 0.f, 0.f };
         }
         // Smooth parameters
         SmoothParams_();
@@ -133,25 +133,25 @@ public:
         float detect = bandpass_low.play(dry);
         detect = bandpass_high.play(detect);
         float pitch = pitch_detector.process(detect);
-        WRITE_VOLATILE(input_pitch, pitch);
+        // WRITE_VOLATILE(input_pitch, pitch);
         // if (pitch < freq_range.min || pitch > freq_range.max) {
         //     pitch = 0;
         // }
 
         // Synth
         float synth = 0;
-        std::array<float, 2> scalings {
+        float scalings[kFreqScalingsSize] = {
             params_.f_drift,
             1.f/params_.f_drift
         };
-        for (size_t n = 0; n < 1/*freq_scalings_.size()*/; n++) {
-            synth += osc_[n].sinebuf(pitch * scalings[n])
-                     * (1.f/freq_scalings_.size());
+        for (size_t n = 0; n < kFreqScalingsSize; n++) {
+            synth += osc_[n].sinewave(pitch * scalings[n])
+                     * kFreqScalingsVol;
         }
 
         // Decimation
         float decim = dns_.play(dry, kSampleRate / params_.dns_ratio);
-        static float decim_prev = 0;
+        static float __not_in_flash("dsp") decim_prev = 0.f;
         if (decim != decim_prev) {
             decim_prev = decim;
             dns_lpf_.setParams(params_.cutoffs[pattern_idx_],
@@ -163,19 +163,19 @@ public:
         decim = dns_lpf_.play(decim, 1.0f, 0, 0, 0);
         decim = dns_hpf_.play(decim);
         decim *= 10.f;
-        decim = std::tanh(decim);
+        decim = tanhf(decim);
         //decim = quant_.play(decim, 16);
 
         // Output
         float out_env = env.getEnv();
         out_env *= 6.f;
-        out_env = std::pow(out_env, 1.8f);
-        out_env = std::tanh(out_env);
+        out_env = powf(out_env, 1.8f);
+        out_env = tanhf(out_env);
         // if (out_env < 0.01) {
         //     out_env = 0;
         // }
-        float yL = synth * out_env + decim * 0.000005f;
-        yL = std::tanh(yL);
+        float yL = synth * out_env + decim * 0.5f;
+        yL = tanhf(yL);
         float yR = yL; //decim;
 
         return { yL, yR };
@@ -207,9 +207,10 @@ protected:
     // - Envelope
     maxiEnvelopeFollowerF env;
     // - Oscillator
-    static constexpr std::array<float, 2> freq_scalings_
-            {0.97f, 1.03f};
-    std::array<maxiOsc, freq_scalings_.size()> osc_;
+    static constexpr size_t kFreqScalingsSize = 2;
+    static constexpr float kFreqScalingsVol =
+        1.f/static_cast<float>(kFreqScalingsSize);
+    maxiOsc osc_[kFreqScalingsSize];
 
     // Downsampler
     // - downsample
