@@ -10,6 +10,10 @@
 
 #include "src/memllib/hardware/memlnaut/Display.hpp"
 
+#include "interfaceRL.hpp"
+#include "sharedMem.hpp"
+
+#define APP_SRAM __not_in_flash("app")
 
 /**
  * @brief FX processor audio app
@@ -245,6 +249,9 @@ protected:
 // Global objects
 using CURRENT_AUDIO_APP = FXProcessorAudioApp;
 using CURRENT_INTERFACE = IMLInterface;
+// using CURRENT_INTERFACE = RLInterface;
+// std::shared_ptr<interfaceRL> APP_SRAM RLInterface;
+
 std::shared_ptr<CURRENT_INTERFACE> interface;
 std::shared_ptr<CURRENT_AUDIO_APP> audio_app;
 std::shared_ptr<MIDIInOut> midi_interf;
@@ -261,6 +268,69 @@ volatile bool interface_ready = false;
 const size_t kN_InputParams = 2;
 const std::vector<size_t> kUARTListenInputs {};
 
+
+void bind_RL_interface(std::shared_ptr<interfaceRL> interface)
+{
+    // Set up momentary switch callbacks
+    MEMLNaut::Instance()->setMomA1Callback([interface] () {
+        static APP_SRAM std::vector<String> msgs = {"Wow, incredible", "Awesome", "That's amazing", "Unbelievable+","I love it!!","More of this","Yes!!!!","A-M-A-Z-I-N-G"};
+        String msg = msgs[rand() % msgs.size()];
+        interface->storeExperience(1.f);
+        Serial.println(msg);
+        
+        display->post(msg);
+    });
+    MEMLNaut::Instance()->setMomA2Callback([interface] () {
+        static APP_SRAM std::vector<String> msgs = {"Awful!","wtf? that sucks","Get rid of this sound","Totally shite","I hate this","Why even bother?","New sound please!","No, please no!!!","Thumbs down"};
+        String msg = msgs[rand() % msgs.size()];
+        interface->storeExperience(-1.f);
+        Serial.println(msg);
+        display->post(msg);
+    });
+    MEMLNaut::Instance()->setMomB1Callback([interface] () {
+        interface->randomiseTheActor();
+        interface->generateAction(true);
+        Serial.println("The Actor is confused");
+        display->post("Actor: i'm confused");
+    });
+    MEMLNaut::Instance()->setMomB2Callback([interface] () {
+        interface->randomiseTheCritic();
+        interface->generateAction(true);
+        Serial.println("The Critic is confounded");
+        display->post("Critic: totally confounded");
+    });
+    // Set up ADC callbacks
+    MEMLNaut::Instance()->setJoyXCallback([interface] (float value) {
+        interface->setState(0, value);
+    });
+    MEMLNaut::Instance()->setJoyYCallback([interface] (float value) {
+        interface->setState(1, value);
+    });
+    MEMLNaut::Instance()->setJoyZCallback([interface] (float value) {
+        interface->setState(2, value);
+    });
+
+    MEMLNaut::Instance()->setRVGain1Callback([interface] (float value) {
+        AudioDriver::setDACVolume(value);
+    });
+
+    MEMLNaut::Instance()->setRVX1Callback([interface] (float value) {
+        size_t divisor = 1 + (value * 100);
+        String msg = "Optimise every " + String(divisor);
+        display->post(msg);
+        interface->setOptimiseDivisor(divisor);
+        Serial.println(msg);
+    });
+    
+
+    // Set up loop callback
+    MEMLNaut::Instance()->setLoopCallback([interface] () {
+        interface->optimiseSometimes();
+        interface->generateAction();
+    });
+
+  
+}
 
 void bind_interface(std::shared_ptr<CURRENT_INTERFACE> &interface)
 {
