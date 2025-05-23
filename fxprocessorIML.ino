@@ -34,6 +34,8 @@ volatile float input_level = 0;
 volatile float input_pitch = 0;
 //volatile bool randomise_actor = false;
 volatile bool optimise_stop = false;
+volatile bool dns_on = true;
+volatile bool harmoniser_on = true;
 
 AUDIO_MEM maxiBiquad dns_hpf_;
 
@@ -174,7 +176,10 @@ public:
         // if (out_env < 0.01) {
         //     out_env = 0;
         // }
-        float yL = synth * out_env + decim * 0.5f;
+        float decim_gain = (dns_on) ? 0.5f : 0.f;
+        float harmoniser_gain = (harmoniser_on) ? 1.f : 0.f;
+        out_env *= harmoniser_gain;
+        float yL = synth * out_env + decim * decim_gain;
         yL = tanhf(yL);
         float yR = yL; //decim;
 
@@ -232,6 +237,35 @@ protected:
     static __attribute__((always_inline)) float LinearMap_(float x, float out_min, float out_max)
     {
         return out_min + (x * (out_max - out_min));
+    }
+
+    /**
+     * @brief Double linear mapping function with intermediate point
+     *
+     * @param x float between 0 and 1 
+     * @param out_min output value at x=0
+     * @param mid_x x coordinate of intermediate point (between 0 and 1)
+     * @param mid_y output value at x=mid_x 
+     * @param out_max output value at x=1
+     * @return float Interpolated value
+     */
+    static __attribute__((always_inline)) float DoubleLinearMapping_(float x, float out_min, float mid_x, float mid_y, float out_max) 
+    {
+        // Branchless clamp of x to [0,1]
+        x = x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
+        
+        // Pre-compute slopes and determine which segment to use
+        const float slope1 = (mid_y - out_min) / mid_x;
+        const float slope2 = (out_max - mid_y) / (1.0f - mid_x);
+        
+        // Branchless segment selection using step function
+        const float t = x <= mid_x ? 0.0f : 1.0f;
+        
+        // First segment: out_min + x * slope1
+        // Second segment: mid_y + (x - mid_x) * slope2
+        // Use fma for better precision and potential hardware acceleration
+        return t * (mid_y + fma(x - mid_x, slope2, 0.0f)) + 
+            (1.0f - t) * fma(x, slope1, out_min);
     }
 
     /**
@@ -304,7 +338,7 @@ static inline __attribute__((always_inline)) float ExpMap_(float x, float out_mi
 
         auto param_ptr = smoothed_params_.data();
         // Assign smoothed parameters to their functions
-        params_.f_drift = LinearMap_(*param_ptr++, 0.86, 0.995);
+        params_.f_drift = DoubleLinearMapping_(*param_ptr++, 0.60, 0.5, 0.95, 0.995);
         params_.dns_ratio = SCurveMap_(*param_ptr++, 4, 12, 0.3);
         params_.env_release = LinearMap_(*param_ptr++, 10, 500);
         env.setRelease(params_.env_release);
@@ -351,7 +385,7 @@ const std::vector<size_t> kUARTListenInputs {};
 
 void bind_RL_interface(std::shared_ptr<interfaceRL> interface)
 {
-#if 0
+#if 1
     MEMLNaut::Instance()->setTogB1Callback([interface] (bool value) {
         if (!value) return;
         //interface->randomiseTheCritic();
@@ -395,8 +429,9 @@ void bind_RL_interface(std::shared_ptr<interfaceRL> interface)
         }
         interface->generateAction();
     });
-#if 0
-    MEMLNaut::Instance()->setMomB2Callback([interface] () {
+#if 1
+    MEMLNaut::Instance()->setTogA1Callback([interface] (bool value) {
+        if (!value) return;
         Serial.printf("%s RL optimisation.\n", (optimise_stop) ? "Starting" : "Stopping");
         bool optimise_stop_local = READ_VOLATILE(optimise_stop);
         optimise_stop_local = !optimise_stop_local;
@@ -426,6 +461,24 @@ void bind_RL_interface(std::shared_ptr<interfaceRL> interface)
         Serial.println("The Actor is confused");
     });
 #endif
+    MEMLNaut::Instance()->setJoySWCallback([interface] (bool value) {
+        if (!value) return;
+        bool dns_on_local = READ_VOLATILE(dns_on);
+        bool harmoniser_on_local = READ_VOLATILE(harmoniser_on);
+        if (harmoniser_on_local && dns_on_local) {
+            dns_on_local = false;
+            harmoniser_on_local = true;
+        } else if (harmoniser_on_local && !dns_on_local) {
+            dns_on_local = true;
+            harmoniser_on_local = false;
+        } else {
+            harmoniser_on_local = true;
+            dns_on_local = true;
+        }
+        WRITE_VOLATILE(dns_on, dns_on_local);
+        WRITE_VOLATILE(harmoniser_on, harmoniser_on_local);
+        Serial.printf("DNS %s Harm %s.\n", dns_on_local ? "off" : "on", harmoniser_on_local ? "off" : "on");
+    });
 
     interface->setOptimiseDivisor(2);
 }
