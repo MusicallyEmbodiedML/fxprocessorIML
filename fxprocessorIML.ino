@@ -59,6 +59,7 @@ public:
         float dns_ratio;
         float cutoffs[kPatternLength];
         float resos[kPatternLength];
+        float oscXFade0;
     };
     static constexpr size_t kN_Params = sizeof(Params) / sizeof(float);
 
@@ -146,9 +147,16 @@ public:
             params_.f_drift,
             1.f/params_.f_drift
         };
+        float oscamps[kFreqScalingsSize] = {
+            sqrtf(params_.oscXFade0), sqrtf(1.f-params_.oscXFade0)
+        };
         for (size_t n = 0; n < kFreqScalingsSize; n++) {
-            synth += osc_[n].sinewave(pitch * scalings[n])
-                     * kFreqScalingsVol;
+            float oscFreq = pitch * scalings[n];
+            float oscSine = osc_[n].sinewave(oscFreq) * oscamps[n];
+            // float oscSine = osc_[n].sinewave(oscFreq) * params_.oscXFade0;
+            // float oscSaw = oscSaw_[n].square(oscFreq) * (1.f - params_.oscXFade0);
+            // float oscMix = oscSine + oscSaw;
+            synth += oscSine * kFreqScalingsVol;
         }
 
         // Decimation
@@ -216,6 +224,7 @@ protected:
     static constexpr float kFreqScalingsVol =
         1.f/static_cast<float>(kFreqScalingsSize);
     maxiOsc osc_[kFreqScalingsSize];
+    maxiOsc oscSaw_[kFreqScalingsSize];
 
     // Downsampler
     // - downsample
@@ -225,6 +234,8 @@ protected:
     maxiSVF dns_lpf_;
     // Loop
     size_t pattern_idx_;
+
+    float oscXFadeGain0=1.0f, osc1XFadeGain1=1.0f;
 
     /**
      * @brief Linear mapping function
@@ -338,7 +349,8 @@ static inline __attribute__((always_inline)) float ExpMap_(float x, float out_mi
 
         auto param_ptr = smoothed_params_.data();
         // Assign smoothed parameters to their functions
-        params_.f_drift = DoubleLinearMapping_(*param_ptr++, 0.60, 0.5, 0.95, 0.995);
+        // params_.f_drift = DoubleLinearMapping_(*param_ptr++, 0.60, 0.5, 0.95, 0.995);
+        params_.f_drift = DoubleLinearMapping_(*param_ptr++, 0.40, 0.9, 0.95, 0.995);
         params_.dns_ratio = SCurveMap_(*param_ptr++, 4, 12, 0.3);
         params_.env_release = LinearMap_(*param_ptr++, 10, 500);
         env.setRelease(params_.env_release);
@@ -353,6 +365,7 @@ static inline __attribute__((always_inline)) float ExpMap_(float x, float out_mi
             // Scale reso
             params_.resos[n] = LinearMap_(params_.resos[n], 0.707, 8);
         }
+        params_.oscXFade0 = LinearMap_(*param_ptr++, 0, 1);
     }
 };
 
