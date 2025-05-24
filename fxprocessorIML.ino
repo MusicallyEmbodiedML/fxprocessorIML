@@ -7,6 +7,7 @@ bool core1_separate_stack = true;
 #include "src/memllib/interface/MIDIInOut.hpp"
 #include "src/memllib/PicoDefs.hpp"
 #include "src/memllib/interface/UARTInput.hpp"
+#include "src/memllib/hardware/FlashFS.hpp"
 
 // Example apps and interfaces
 #include "src/memllib/examples/IMLInterface.hpp"
@@ -253,29 +254,29 @@ protected:
     /**
      * @brief Double linear mapping function with intermediate point
      *
-     * @param x float between 0 and 1 
+     * @param x float between 0 and 1
      * @param out_min output value at x=0
      * @param mid_x x coordinate of intermediate point (between 0 and 1)
-     * @param mid_y output value at x=mid_x 
+     * @param mid_y output value at x=mid_x
      * @param out_max output value at x=1
      * @return float Interpolated value
      */
-    static __attribute__((always_inline)) float DoubleLinearMapping_(float x, float out_min, float mid_x, float mid_y, float out_max) 
+    static __attribute__((always_inline)) float DoubleLinearMapping_(float x, float out_min, float mid_x, float mid_y, float out_max)
     {
         // Branchless clamp of x to [0,1]
         x = x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
-        
+
         // Pre-compute slopes and determine which segment to use
         const float slope1 = (mid_y - out_min) / mid_x;
         const float slope2 = (out_max - mid_y) / (1.0f - mid_x);
-        
+
         // Branchless segment selection using step function
         const float t = x <= mid_x ? 0.0f : 1.0f;
-        
+
         // First segment: out_min + x * slope1
         // Second segment: mid_y + (x - mid_x) * slope2
         // Use fma for better precision and potential hardware acceleration
-        return t * (mid_y + fma(x - mid_x, slope2, 0.0f)) + 
+        return t * (mid_y + fma(x - mid_x, slope2, 0.0f)) +
             (1.0f - t) * fma(x, slope1, out_min);
     }
 
@@ -449,6 +450,9 @@ void bind_RL_interface(std::shared_ptr<interfaceRL> interface)
         bool optimise_stop_local = READ_VOLATILE(optimise_stop);
         optimise_stop_local = !optimise_stop_local;
         WRITE_VOLATILE(optimise_stop, optimise_stop_local);
+        if (optimise_stop_local) {
+            interface->saveNetworks();
+        }
     });
 #endif
     MEMLNaut::Instance()->setMomA2Callback([interface] () {
@@ -646,6 +650,8 @@ void setup()
     // midi_interf->Setup(CURRENT_AUDIO_APP::kN_Params);
     // midi_interf->SetMIDISendChannel(1);
     // Serial.println("MIDI setup complete.");
+    // Setup FlashFS
+    FlashFS::begin();
 
     delay(100); // Allow Serial2 to stabilize
 

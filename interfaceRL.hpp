@@ -10,6 +10,7 @@
 #include "sharedMem.hpp"
 
 #include "src/memllib/PicoDefs.hpp"
+#include "src/memllib/hardware/FlashFS.hpp"
 
 #define RL_MEM __not_in_flash("rlmem")
 
@@ -60,6 +61,11 @@ public:
             use_constant_weight_init,
             constant_weight_init
         );
+        if (!FlashFS::exists(ACTOR_FILE)) {
+            Serial.println("Actor network file not found, creating new actor network.");
+        } else {
+            actor->LoadMLPNetwork(ACTOR_FILE);
+        }
 
         actorTarget = std::make_shared<MLP<float> > (
             actor_layers_nodes,
@@ -68,6 +74,11 @@ public:
             use_constant_weight_init,
             constant_weight_init
         );
+        if (!FlashFS::exists(ACTOR_TARGET_FILE)) {
+            Serial.println("Actor target network file not found, creating new actor target network.");
+        } else {
+            actorTarget->LoadMLPNetwork(ACTOR_TARGET_FILE);
+        }
 
         critic = std::make_shared<MLP<float> > (
             critic_layers_nodes,
@@ -76,6 +87,12 @@ public:
             use_constant_weight_init,
             constant_weight_init
         );
+        if (!FlashFS::exists(CRITIC_FILE)) {
+            Serial.println("Critic network file not found, creating new critic network.");
+        } else {
+            critic->LoadMLPNetwork(CRITIC_FILE);
+        }
+
         criticTarget = std::make_shared<MLP<float> > (
             critic_layers_nodes,
             layers_activfuncs,
@@ -83,6 +100,11 @@ public:
             use_constant_weight_init,
             constant_weight_init
         );
+        if (!FlashFS::exists(CRITIC_TARGET_FILE)) {
+            Serial.println("Critic target network file not found, creating new critic target network.");
+        } else {
+            criticTarget->LoadMLPNetwork(CRITIC_TARGET_FILE);
+        }
     }
 
     void optimise() {
@@ -262,8 +284,32 @@ public:
         replayMem.clear();
     }
 
+    void saveNetworks() {
+        actor->SaveMLPNetwork(ACTOR_FILE);
+        actorTarget->SaveMLPNetwork(ACTOR_TARGET_FILE);
+        critic->SaveMLPNetwork(CRITIC_FILE);
+        criticTarget->SaveMLPNetwork(CRITIC_TARGET_FILE);
+        if (!FlashFS::exists(ACTOR_FILE)) {
+            Serial.println("Error saving actor network to filesystem.");
+        } else if (!FlashFS::exists(ACTOR_TARGET_FILE)) {
+            Serial.println("Error saving actor target network to filesystem.");
+        } else if (!FlashFS::exists(CRITIC_FILE)) {
+            Serial.println("Error saving critic network to filesystem.");
+        } else if (!FlashFS::exists(CRITIC_TARGET_FILE)) {
+            Serial.println("Error saving critic target network to filesystem.");
+        } else {
+            Serial.println("Networks saved successfully to filesystem.");
+        }
+    }
+
 
 private:
+    // Network filenames as const char arrays (stored in flash memory)
+    static constexpr const char* ACTOR_FILE = "actor.bin";
+    static constexpr const char* ACTOR_TARGET_FILE = "actorTarget.bin";
+    static constexpr const char* CRITIC_FILE = "critic.bin";
+    static constexpr const char* CRITIC_TARGET_FILE = "criticTarget.bin";
+
     static constexpr size_t bias=1;
 
     size_t optimiseDivisor = 40;
