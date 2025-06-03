@@ -632,7 +632,7 @@ void bind_RL_interface(std::shared_ptr<interfaceRL> interface)
 void setup()
 {
     Serial.begin(115200);
-    while (!Serial) {}
+    //while (!Serial) {}
     Serial.println("Serial initialised.");
     WRITE_VOLATILE(serial_ready, true);
 
