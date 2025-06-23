@@ -22,6 +22,8 @@
 #include "src/memllib/audio/AudioAppBase.hpp"
 #include "src/memllib/synth/OnePoleSmoother.hpp"
 
+const char FIRMWARE_NAME[] = "-- FX Processor POPR --";
+
 static constexpr float shift_amount = -3.f;
 
 volatile float input_level = 0;
@@ -234,7 +236,7 @@ void setup()
     pinMode(33, OUTPUT);
     disp = std::make_shared<display>();
     disp->setup();
-    disp->post("MEML FX Unit");
+    disp->post(FIRMWARE_NAME);
 
     // Move MIDI setup after Serial is confirmed ready
     Serial.println("Initializing MIDI...");
