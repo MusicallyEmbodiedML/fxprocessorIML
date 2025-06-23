@@ -270,11 +270,6 @@ void setup()
     interface->bindMIDI(midi_interf);
     Serial.println("Bound interface to MIDI input.");
 
-    // Bind volume pot
-    MEMLNaut::Instance()->setRVGain1Callback([] (float value) {
-        AudioDriver::setDACVolume(value*4.0f);
-    });
-
     WRITE_VOLATILE(core_0_ready, true);
     while (!READ_VOLATILE(core_1_ready)) {
         MEMORY_BARRIER();
