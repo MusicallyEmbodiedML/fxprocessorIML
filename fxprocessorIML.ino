@@ -7,16 +7,14 @@ bool core1_separate_stack = true;
 #include "src/memllib/interface/MIDIInOut.hpp"
 #include "src/memllib/PicoDefs.hpp"
 #include "src/memllib/interface/UARTInput.hpp"
-#include "src/memllib/hardware/FlashFS.hpp"
 
 // Example apps and interfaces
-#include "src/memllib/examples/IMLInterface.hpp"
+#include "src/memllib/examples/InterfaceRL.hpp"
 
-#include "src/memllib/hardware/memlnaut/Display.hpp"
 #include "src/memllib/hardware/memlnaut/Pins.hpp"
 
-#include "interfaceRL.hpp"
-#include "sharedMem.hpp"
+#include <new> // for placement new
+#include "hardware/structs/bus_ctrl.h"
 
 #define APP_SRAM __not_in_flash("app")
 
@@ -122,7 +120,7 @@ public:
         setup_ = true;
     }
 
-    stereosample_t Process(const stereosample_t x) override
+    __force_inline stereosample_t ProcessInline(const stereosample_t x)
     {
         // WRITE_VOLATILE(input_level, std::abs(x.L) + std::abs(x.R));
         if (!setup_) {
@@ -373,12 +371,128 @@ static inline __attribute__((always_inline)) float ExpMap_(float x, float out_mi
 
 /******************************* */
 
+class TomRLInterface : public InterfaceRL
+{
+public:
+    void bind_RL_interface(bool disable_joystick = false) override
+    {
+    #if 1
+        MEMLNaut::Instance()->setTogB1Callback([this] (bool value) {
+            if (!value) return;
+            this->_forget_replay_mem_interf();
+        });
+    #endif
+
+        // Set up ADC callbacks
+        MEMLNaut::Instance()->setJoyXCallback([this] (float value) {
+            this->setState(0, value);
+        });
+        MEMLNaut::Instance()->setJoyYCallback([this] (float value) {
+            this->setState(1, value);
+        });
+        // MEMLNaut::Instance()->setJoyZCallback([interface] (float value) {
+        //     interface->setState(2, value);
+        // });
+
+        MEMLNaut::Instance()->setRVX1Callback([this] (float value) {
+            this->setOptimiseDivisorInterf(value);
+        });
+        MEMLNaut::Instance()->setRVX1Callback([this](float value) { // scr_ref no longer captured directly
+            this->setOptimiseDivisorInterf(value);
+        });
+
+        MEMLNaut::Instance()->setRVY1Callback([this](float value) {
+            // this->setRewardScaleInterf(value);
+            this->setLRScale(value);
+        });
+
+        MEMLNaut::Instance()->setRVZ1Callback([this](float value) { // scr_ref no longer captured directly
+            setNoiseLevel(value);
+        });
+
+        // Set up loop callback
+        MEMLNaut::Instance()->setLoopCallback([this] () {
+            bool optimise_stop_local = READ_VOLATILE(optimise_stop);
+            if (!optimise_stop_local) {
+                this->optimiseSometimes();
+            }
+            this->generateAction();
+        });
+    #if 1
+        MEMLNaut::Instance()->setTogA1Callback([] (bool value) {
+            if (!value) return;
+            Serial.printf("%s RL optimisation.\n", (optimise_stop) ? "Starting" : "Stopping");
+            bool optimise_stop_local = READ_VOLATILE(optimise_stop);
+            optimise_stop_local = !optimise_stop_local;
+            WRITE_VOLATILE(optimise_stop, optimise_stop_local);
+            if (optimise_stop_local) {
+                //TODO
+                //interface->saveNetworks();
+            }
+        });
+    #endif
+        MEMLNaut::Instance()->setMomA2Callback([this] () {
+            this->trigger_like();
+        });
+        MEMLNaut::Instance()->setTogA2Callback([this] (bool value) {
+            if (!value) return;
+            this->trigger_dislike();
+        });
+
+    #if 1
+        MEMLNaut::Instance()->setTogB2Callback([this] (bool value) {
+            if (!value) return;
+            this->trigger_randomiseRL();
+        });
+    #endif
+        MEMLNaut::Instance()->setJoySWCallback([this] (bool value) {
+            if (!value) return;
+            bool dns_on_local = READ_VOLATILE(dns_on);
+            bool harmoniser_on_local = READ_VOLATILE(harmoniser_on);
+            if (harmoniser_on_local && dns_on_local) {
+                dns_on_local = false;
+                harmoniser_on_local = true;
+            } else if (harmoniser_on_local && !dns_on_local) {
+                dns_on_local = true;
+                harmoniser_on_local = false;
+            } else {
+                harmoniser_on_local = true;
+                dns_on_local = true;
+            }
+            WRITE_VOLATILE(dns_on, dns_on_local);
+            WRITE_VOLATILE(harmoniser_on, harmoniser_on_local);
+            Serial.printf("DNS %s Harm %s.\n", dns_on_local ? "off" : "on", harmoniser_on_local ? "off" : "on");
+        });
+
+        setOptimiseDivisor(2);
+    }
+};
+
+
 
 // Global objects
 using CURRENT_AUDIO_APP = FXProcessorAudioApp;
 //using CURRENT_INTERFACE = IMLInterface;
-using CURRENT_INTERFACE = interfaceRL;
-//std::shared_ptr<interfaceRL> APP_SRAM RLInterface;
+using CURRENT_INTERFACE = TomRLInterface;
+
+#define APP_SRAM __not_in_flash("app")
+
+static constexpr char APP_NAME[] = "-- FXProcessor Tom --";
+
+// Statically allocated, properly aligned storage in AUDIO_MEM for objects
+alignas(FXProcessorAudioApp) char AUDIO_MEM audio_app_mem[sizeof(FXProcessorAudioApp)];
+
+uint32_t get_rosc_entropy_seed(int bits) {
+    uint32_t seed = 0;
+    for (int i = 0; i < bits; ++i) {
+        // Wait for a bit of time to allow jitter to accumulate
+        busy_wait_us_32(5);
+        // Pull LSB from ROSC rand output
+        seed <<= 1;
+        seed |= (rosc_hw->randombit & 1);
+    }
+    return seed;
+}
 
 std::shared_ptr<CURRENT_INTERFACE> APP_SRAM interface;
 std::shared_ptr<CURRENT_AUDIO_APP> APP_SRAM audio_app;
@@ -392,245 +506,22 @@ volatile bool core_1_ready = false;
 volatile bool serial_ready = false;
 volatile bool interface_ready = false;
 
-// We're only bound to the joystick inputs (x, y, rotate)
+// We're only bound to the joystick inputs (x, y)
 const size_t kN_InputParams = 2;
-const std::vector<size_t> kUARTListenInputs {};
-
-
-void bind_RL_interface(std::shared_ptr<interfaceRL> interface)
-{
-#if 1
-    MEMLNaut::Instance()->setTogB1Callback([interface] (bool value) {
-        if (!value) return;
-        //interface->randomiseTheCritic();
-        interface->forgetMemory();
-        interface->generateAction(true);
-        Serial.println("I've forgotten everything");
-        // display->post("Critic: totally confounded");
-    });
-#endif
-
-    // Set up ADC callbacks
-    MEMLNaut::Instance()->setJoyXCallback([interface] (float value) {
-        interface->setState(0, value);
-    });
-    MEMLNaut::Instance()->setJoyYCallback([interface] (float value) {
-        interface->setState(1, value);
-    });
-    // MEMLNaut::Instance()->setJoyZCallback([interface] (float value) {
-    //     interface->setState(2, value);
-    // });
-
-    MEMLNaut::Instance()->setRVGain1Callback([interface] (float value) {
-        //AudioDriver::setDACVolume(value);
-        AudioDriver::setDACVolume(3.9f);
-    });
-#if 0
-    MEMLNaut::Instance()->setRVX1Callback([interface] (float value) {
-        size_t divisor = 1 + (value * 100);
-        String msg = "Optimise every " + String(divisor);
-        // display->post(msg);
-        interface->setOptimiseDivisor(divisor);
-        Serial.println(msg);
-    });
-#endif
-
-    // Set up loop callback
-    MEMLNaut::Instance()->setLoopCallback([interface] () {
-        bool optimise_stop_local = READ_VOLATILE(optimise_stop);
-        if (!optimise_stop_local) {
-            interface->optimiseSometimes();
-        }
-        interface->generateAction();
-    });
-#if 1
-    MEMLNaut::Instance()->setTogA1Callback([interface] (bool value) {
-        if (!value) return;
-        Serial.printf("%s RL optimisation.\n", (optimise_stop) ? "Starting" : "Stopping");
-        bool optimise_stop_local = READ_VOLATILE(optimise_stop);
-        optimise_stop_local = !optimise_stop_local;
-        WRITE_VOLATILE(optimise_stop, optimise_stop_local);
-        if (optimise_stop_local) {
-            interface->saveNetworks();
-        }
-    });
-#endif
-    MEMLNaut::Instance()->setMomA2Callback([interface] () {
-        static APP_SRAM std::vector<String> msgs = {"Wow, incredible", "Awesome", "That's amazing", "Unbelievable+","I love it!!","More of this","Yes!!!!","A-M-A-Z-I-N-G", "Tom's favourite"};
-        String msg = msgs[rand() % msgs.size()];
-        interface->storeExperience(1.f);
-        Serial.println(msg);
-    });
-    MEMLNaut::Instance()->setTogA2Callback([interface] (bool value) {
-        if (!value) return;
-        static APP_SRAM std::vector<String> msgs = {"Awful!","wtf? that sucks","Get rid of this sound","Totally shite","I hate this","Why even bother?","New sound please!","No, please no!!!","Thumbs down", "Tom says no"};
-        String msg = msgs[rand() % msgs.size()];
-        interface->storeExperience(-1.f);
-        Serial.println(msg);
-    });
-
-#if 1
-    MEMLNaut::Instance()->setTogB2Callback([interface] (bool value) {
-        if (!value) return;
-        interface->randomiseTheActor();
-        // WRITE_VOLATILE(randomise_actor, true);
-        interface->generateAction(true);
-        Serial.println("The Actor is confused");
-    });
-#endif
-    MEMLNaut::Instance()->setJoySWCallback([interface] (bool value) {
-        if (!value) return;
-        bool dns_on_local = READ_VOLATILE(dns_on);
-        bool harmoniser_on_local = READ_VOLATILE(harmoniser_on);
-        if (harmoniser_on_local && dns_on_local) {
-            dns_on_local = false;
-            harmoniser_on_local = true;
-        } else if (harmoniser_on_local && !dns_on_local) {
-            dns_on_local = true;
-            harmoniser_on_local = false;
-        } else {
-            harmoniser_on_local = true;
-            dns_on_local = true;
-        }
-        WRITE_VOLATILE(dns_on, dns_on_local);
-        WRITE_VOLATILE(harmoniser_on, harmoniser_on_local);
-        Serial.printf("DNS %s Harm %s.\n", dns_on_local ? "off" : "on", harmoniser_on_local ? "off" : "on");
-    });
-
-    interface->setOptimiseDivisor(2);
-}
-
-// #if 0
-// void bind_interface(std::shared_ptr<CURRENT_INTERFACE> &interface)
-// {
-// /*
-//     // Set up momentary switch callbacks
-//     MEMLNaut::Instance()->setMomA1Callback([interface] () {
-//         interface->Randomise();
-//         if (display) {
-//             display->post("Randomised");
-//         }
-//     });
-//     MEMLNaut::Instance()->setMomA2Callback([interface] () {
-//         interface->ClearData();
-//         if (display) {
-//             display->post("Dataset cleared");
-//         }
-//     });
-// */
-//     MEMLNaut::Instance()->setMomB2Callback([interface] () {
-//         Serial.println("MOM_B2 pressed");
-//     });
-//     MEMLNaut::Instance()->setMomB1Callback([interface] () {
-//         Serial.println("MOM_B1 pressed");
-//     });
-//     MEMLNaut::Instance()->setMomA2Callback([interface] () {
-//         Serial.println("MOM_A2 pressed");
-//     });
-
-//     // Set up toggle switch callbacks
-// /*
-//     MEMLNaut::Instance()->setTogA1Callback([interface] (bool state) {
-//         if (display) {
-//             display->post(state ? "Training mode" : "Inference mode");
-//         }
-//         interface->SetTrainingMode(state ? CURRENT_INTERFACE::TRAINING_MODE : CURRENT_INTERFACE::INFERENCE_MODE);
-//         if (display && state == false) {
-//             display->post("Model trained");
-//         }
-//     });
-// */
-//     MEMLNaut::Instance()->setTogA1Callback([interface] (bool state) {
-//         if (state) {
-//             Serial.println("TOG_A1 pressed");
-//         }
-//     });
-//     MEMLNaut::Instance()->setTogA2Callback([interface] (bool state) {
-//         if (state) {
-//             Serial.println("TOG_A2 pressed");
-//         }
-//     });
-//     MEMLNaut::Instance()->setTogB1Callback([interface] (bool state) {
-//         if (state) {
-//             Serial.println("TOG_B1 pressed");
-//         }
-//     });
-//     MEMLNaut::Instance()->setTogB2Callback([interface] (bool state) {
-//         if (state) {
-//             Serial.println("TOG_B2 pressed");
-//             // Randomise
-//             interface->SetTrainingMode(CURRENT_INTERFACE::TRAINING_MODE);
-//             interface->Randomise();
-//         }
-//     });
-
-//     MEMLNaut::Instance()->setJoySWCallback([interface] (bool state) {
-//         interface->SaveInput(state ? CURRENT_INTERFACE::STORE_VALUE_MODE : CURRENT_INTERFACE::STORE_POSITION_MODE);
-//         // if (display) {
-//         //     display->post(state ? "Where do you want it?" : "Here!");
-//         // }
-//     });
-
-//     // Set up joystick callbacks
-//     if (kN_InputParams > 0) {
-//         MEMLNaut::Instance()->setJoyXCallback([interface] (float value) {
-//             interface->SetInput(0, value);
-//         });
-//         MEMLNaut::Instance()->setJoyYCallback([interface] (float value) {
-//             interface->SetInput(1, value);
-//         });
-// /*
-//         MEMLNaut::Instance()->setJoyZCallback([interface] (float value) {
-//             interface->SetInput(2, value);
-//         });
-// */
-//     }
-// /*
-//     // Set up other ADC callbacks
-//     MEMLNaut::Instance()->setRVZ1Callback([interface] (float value) {
-//         // Scale value from 0-1 range to 1-3000
-//         value = 1.0f + (value * 2999.0f);
-//         interface->SetIterations(static_cast<size_t>(value));
-//     });
-// */
-
-//     // Set up loop callback
-//     MEMLNaut::Instance()->setLoopCallback([interface] () {
-//         interface->ProcessInput();
-//     });
-
-//     MEMLNaut::Instance()->setRVGain1Callback([interface] (float value) {
-//         //AudioDriver::setDACVolume(value);
-//         //Serial.println(value*4);
-//         //Serial.println("ADCDAC bypassed!");
-//         AudioDriver::setDACVolume(3.9f);
-//     });
-// }
-// #endif
-
-// void bind_uart_in(std::shared_ptr<CURRENT_INTERFACE> &interface) {
-//     if (uart_input) {
-//         uart_input->SetCallback([interface] (const std::vector<float>& values) {
-//             for (size_t i = 0; i < values.size(); ++i) {
-// #if 0
-//                 interface->SetInput(kN_InputParams + i, values[i]);
-// #endif
-//             }
-//         });
-//     }
-// }
-
-// void bind_midi(std::shared_ptr<CURRENT_INTERFACE> &interface) {
-//     if (midi_interf) {
-//         midi_interf->SetCCCallback([interface] (uint8_t cc_number, uint8_t cc_value) {
-//             Serial.printf("MIDI CC %d: %d\n", cc_number, cc_value);
-//         });
-//     }
-// }
 
 
 void setup()
 {
+    // FILE *fp = fopen("/thisfilelivesonflash.txt", "w");
+    // fprintf(fp, "Hello!\n");
+    // fclose(fp);
+
+    bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS |
+        BUSCTRL_BUS_PRIORITY_DMA_R_BITS | BUSCTRL_BUS_PRIORITY_PROC1_BITS;
+
+    uint32_t seed = get_rosc_entropy_seed(32);
+    srand(seed);
+
     Serial.begin(115200);
     //while (!Serial) {}
     Serial.println("Serial initialised.");
@@ -640,45 +531,34 @@ void setup()
     MEMLNaut::Initialize();
     pinMode(33, OUTPUT);
     digitalWrite(33,0);
-    // display = std::make_shared<Display>();
-    // display->setup();
-    // display->post("MEML FX Unit");
-
-    // Move MIDI setup after Serial is confirmed ready
-    // Serial.println("Initializing MIDI...");
-    // midi_interf = std::make_shared<MIDIInOut>();
-    // midi_interf->Setup(CURRENT_AUDIO_APP::kN_Params);
-    // midi_interf->SetMIDISendChannel(1);
-    // Serial.println("MIDI setup complete.");
-    // Setup FlashFS
-    FlashFS::begin();
-
-    delay(100); // Allow Serial2 to stabilize
-
-    // Setup UART input
-    // uart_input = std::make_shared<UARTInput>(kUARTListenInputs);
-    const size_t total_input_params = kN_InputParams; // + kUARTListenInputs.size();
-
-    // Setup interface with memory barrier protection
     {
         auto temp_interface = std::make_shared<CURRENT_INTERFACE>();
+        temp_interface->setup(kN_InputParams, CURRENT_AUDIO_APP::kN_Params);
         MEMORY_BARRIER();
-        temp_interface->setup(total_input_params, CURRENT_AUDIO_APP::kN_Params);
-        MEMORY_BARRIER();
-        // temp_interface->SetMIDIInterface(midi_interf);
-        // MEMORY_BARRIER();
         interface = temp_interface;
         MEMORY_BARRIER();
     }
+    // Setup interface with memory barrier protection
     WRITE_VOLATILE(interface_ready, true);
-
     // Bind interface after ensuring it's fully initialized
-    bind_RL_interface(interface);
+    interface->bind_RL_interface(true);
     Serial.println("Bound interface to MEMLNaut.");
-    // bind_uart_in(interface);
-    // Serial.println("Bound interface to UART input.");
-    // bind_midi(interface);
-    // Serial.println("Bound interface to MIDI input.");
+
+    //scr_ptr->post(APP_NAME);
+    //add_repeating_timer_ms(-39, displayUpdate, NULL, &timerDisplay);
+    std::shared_ptr<MessageView> helpView = std::make_shared<MessageView>("Help");
+    helpView->post(APP_NAME);
+    helpView->post("TA: Down: Forget replay memory");
+    helpView->post("MA: Up: Randomise actor");
+    helpView->post("MA: Down: Randomise critic");
+    helpView->post("MB: Up: Positive reward");
+    helpView->post("MB: Down: Negative reward");
+    helpView->post("Y: Optimisation rate");
+    helpView->post("Z: OU noise");
+    helpView->post("Joystick: Explore");
+    MEMLNaut::Instance()->disp->AddView(helpView);
+
+    MEMLNaut::Instance()->addSystemInfoView();
 
     WRITE_VOLATILE(core_0_ready, true);
     while (!READ_VOLATILE(core_1_ready)) {
@@ -688,39 +568,6 @@ void setup()
 
     Serial.println("Finished initialising core 0.");
 }
-
-#if 0
-void pollButtons()
-{
-    static const size_t kForgetPin = Pins::TOG_B1;
-    static const size_t kOptimPin = Pins::MOM_B2;
-    static const size_t kDecimatorOn = Pins::JOY_SW;
-    static constexpr std::array<size_t, 3> kButtonPins {
-        kForgetPin, kOptimPin, kDecimatorOn };
-    static std::array<bool, kButtonPins.size()> button_states {};
-
-    for (size_t i = 0; i < kButtonPins.size(); ++i) {
-        bool current_state = digitalRead(kButtonPins[i]);
-        if (current_state == LOW && !button_states[i]) {
-            // Button pressed
-            switch (kButtonPins[i]) {
-                case kForgetPin:
-                    Serial.println("Forget button pressed");
-                    break;
-                case kOptimPin:
-                    Serial.println("Optimise button pressed");
-                    break;
-                case kDecimatorOn:
-                    Serial.println("Decimator on button pressed");
-                    break;
-                default:
-                    break;
-            }
-        }
-        button_states[i] = current_state;
-    }
-}
-#endif
 
 void loop()
 {
@@ -790,6 +637,34 @@ void loop()
     }
 }
 
+
+void AUDIO_FUNC(audio_block_callback)(float in[][kBufferSize], float out[][kBufferSize], size_t n_channels, size_t n_frames)
+{
+    digitalWrite(Pins::LED_TIMING, HIGH);
+    for (size_t i = 0; i < n_frames; ++i) {
+
+        stereosample_t x {
+            in[0][i],
+            in[1][i]
+        }, y;
+
+        // Audio processing
+        if (audio_app) {
+            y = audio_app->ProcessInline(x);
+        } else {
+            y = x; // Pass through if audio_app is not ready
+            y.L *= y.L;
+            y.R *= y.R;
+        }
+
+        out[0][i] = y.L;
+        out[1][i] = y.R;
+    }
+    digitalWrite(Pins::LED_TIMING, LOW);
+
+}
+
+
 void setup1()
 {
     while (!READ_VOLATILE(serial_ready)) {
@@ -802,16 +677,24 @@ void setup1()
         delay(1);
     }
 
-    // Create audio app with memory barrier protection
+    // Create audio app using placement-new into static buffer and custom deleter
     {
-        auto temp_audio_app = std::make_shared<CURRENT_AUDIO_APP>();
-        temp_audio_app->Setup(AudioDriver::GetSampleRate(), interface);
+        CURRENT_AUDIO_APP* audio_raw = new (audio_app_mem) CURRENT_AUDIO_APP();
+        std::shared_ptr<InterfaceBase> selectedInterface = std::dynamic_pointer_cast<InterfaceBase>(interface);
+
+        audio_raw->Setup(AudioDriver::GetSampleRate(), selectedInterface);
+
+        // shared_ptr with custom deleter calling only the destructor (control block still allocates)
+        auto audio_deleter = [](CURRENT_AUDIO_APP* p) { if (p) p->~CURRENT_AUDIO_APP(); };
+        std::shared_ptr<CURRENT_AUDIO_APP> temp_audio_app(audio_raw, audio_deleter);
+
         MEMORY_BARRIER();
         audio_app = temp_audio_app;
         MEMORY_BARRIER();
     }
 
     // Start audio driver
+    AudioDriver::SetBlockCallback(audio_block_callback);
     AudioDriver::Setup(audio_app->GetDriverConfig());
 
     WRITE_VOLATILE(core_1_ready, true);
