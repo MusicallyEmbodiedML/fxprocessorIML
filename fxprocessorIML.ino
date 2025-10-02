@@ -46,7 +46,7 @@ public:
             .mic_input = true,
             .line_level = 3,
             .mic_gain_dB = 20,
-            .output_volume = 0.8f
+            .output_volume = 0.96f
         };
     }
 
@@ -394,21 +394,21 @@ public:
         //     interface->setState(2, value);
         // });
 
-        MEMLNaut::Instance()->setRVX1Callback([this] (float value) {
-            this->setOptimiseDivisorInterf(value);
-        });
-        MEMLNaut::Instance()->setRVX1Callback([this](float value) { // scr_ref no longer captured directly
-            this->setOptimiseDivisorInterf(value);
-        });
+        // MEMLNaut::Instance()->setRVX1Callback([this](float value) { // scr_ref no longer captured directly
+        //     this->setOptimiseDivisorInterf(value);
+        // });
 
-        MEMLNaut::Instance()->setRVY1Callback([this](float value) {
-            // this->setRewardScaleInterf(value);
-            this->setLRScale(value);
-        });
+        // MEMLNaut::Instance()->setRVY1Callback([this](float value) {
+        //     // this->setRewardScaleInterf(value);
+        //     this->setLRScale(value);
+        // });
 
-        MEMLNaut::Instance()->setRVZ1Callback([this](float value) { // scr_ref no longer captured directly
-            setNoiseLevel(value);
-        });
+        // MEMLNaut::Instance()->setRVZ1Callback([this](float value) { // scr_ref no longer captured directly
+        //     setNoiseLevel(value);
+        // });
+        setOptimiseDivisorInterf(0);
+        setLRScale(1.f);
+        setNoiseLevel(0);
 
         // Set up loop callback
         MEMLNaut::Instance()->setLoopCallback([this] () {
@@ -419,9 +419,12 @@ public:
             this->generateAction();
         });
     #if 1
-        MEMLNaut::Instance()->setTogA1Callback([] (bool value) {
+        MEMLNaut::Instance()->setTogA1Callback([this] (bool value) {
             if (!value) return;
-            Serial.printf("%s RL optimisation.\n", (optimise_stop) ? "Starting" : "Stopping");
+            char s[128];
+            sprintf(s, "%s RL optimisation.\n", (optimise_stop) ? "Starting" : "Stopping");
+            Serial.printf(s);
+            if (this->msgView) this->msgView->post(s);
             bool optimise_stop_local = READ_VOLATILE(optimise_stop);
             optimise_stop_local = !optimise_stop_local;
             WRITE_VOLATILE(optimise_stop, optimise_stop_local);
